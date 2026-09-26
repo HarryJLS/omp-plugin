@@ -1,0 +1,12 @@
+{
+  "name": "omp-option-chords",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Restore omp's Alt chords on terminals that compose Option+key into a character (Warp, Terminal.app, …)",
+  "omp": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
