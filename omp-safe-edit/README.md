@@ -1,5 +1,8 @@
 # omp-safe-edit
 
+Version: `0.1.0` — recorded here only; this directory ships raw `.ts` files and has no
+`package.json`. Changelog: [`CHANGELOG.md`](./CHANGELOG.md).
+
 Two oh-my-pi extensions that replace the built-in line-anchored `edit` tool with a
 content-anchored one. **Install one, not both** — pick the anchoring style you prefer.
 
@@ -171,5 +174,5 @@ disappears. These remain, and no anchoring scheme can catch them:
   `ast_edit` tool are all still available.
 - **Multi-file `ctx_patch` is not atomic.** A failure on the third file leaves the first
   two changed; the error says so. codex has the same property (its spec §6.1).
-- **New code.** These are ~1000 lines with 75 passing tests, against a `hashline` that has
+- **New code.** These are ~1200 lines with 88 passing tests, against a `hashline` that has
   years of hardening behind it. Different risk, not zero risk.
