@@ -1,9 +1,9 @@
 {
   "name": "omp-auto-update",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Follow omp's own startup version check and run proxyon + omp update in the background when a new release exists",
+  "description": "Spawn a detached proxied `omp update` after session start; omp itself decides whether an update happens",
   "omp": {
     "extensions": [
       "./src/index.ts"

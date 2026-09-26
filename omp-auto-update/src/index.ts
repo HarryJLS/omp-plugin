@@ -1,24 +1,26 @@
 /**
  * Background omp updater.
  *
- * `omp` already checks the release channel from `startup.checkUpdate` on every
- * startup and prints an "Update Available — run: omp update" banner when the
- * registry advertises a newer version. This extension reuses that exact
- * decision — the same setting, the same `update.channel`, the same
- * `getLatestRelease` the startup check calls, and the same
- * `Bun.semver.order` comparison — and, when it says an update is available,
- * runs `proxyon` + `omp update` in a detached login shell so the user never
- * has to. A newer build only takes effect on the next omp start; the running
- * session keeps its own version.
+ * `omp update` already performs omp's own version check — the same registry,
+ * the same `update.channel` setting the startup banner uses — and no-ops when
+ * nothing is newer. This extension never duplicates that decision in process:
+ * on `session_start` it spawns a detached login zsh that runs `omp update`
+ * under the user's proxy, at most once per day. omp itself decides whether an
+ * update actually happens; a newer build only takes effect on the next omp
+ * start, and the running session is never touched.
  *
- * Only the main session runs the check (subagent sessions are skipped), and it
- * runs ~1.5s after `session_start` so it never delays the first frame. If that
- * check itself fails — no proxy in this process, registry hiccup — the decision
- * is handed to `omp update` inside the proxied shell, which re-checks and
- * no-ops when nothing is newer. The detached shell owns the actual update: it
- * takes a directory lock so two concurrent omp sessions cannot update at once,
- * and records an attempt stamp so a failing install is retried at most once per
- * day instead of on every session.
+ * The detached shell owns everything: it takes a directory lock so concurrent
+ * omp sessions cannot run it twice, stamps the last attempt so it fires at
+ * most once per 24h, resolves the proxy in a ladder (`proxyon` alias →
+ * existing proxy env → warning), and redirects its own output to
+ * ~/.omp/logs/auto-update.log, so nothing is printed into the running session.
+ *
+ * Subagent sessions load no user extensions, and the module-level `scheduled`
+ * flag keeps one spawn per process; it runs ~1.5s after `session_start` so it
+ * never delays the first frame. The extension deliberately imports nothing
+ * from omp at runtime — the `ExtensionAPI` import is type-only and erased — so
+ * omp internals changing shape (three settings/check API generations already
+ * broke earlier builds of this extension) can never break it again.
  */
 
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
@@ -26,16 +28,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { VERSION } from "@oh-my-pi/pi-coding-agent";
-import { getLatestRelease } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
-import { settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgStartupCheckUpdate, cfgUpdateChannel } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
-/** Mirrors the startup check's own timeout so a slow registry cannot wedge us. */
-const CHECK_TIMEOUT_MS = 5_000;
-/** Let the startup frame paint before we spend a network round-trip. */
+/** Let the startup frame paint before the detached shell fires. */
 const START_DELAY_MS = 1_500;
-/** Minimum spacing between install attempts, in seconds. */
+/** Minimum spacing between updater runs, in seconds. */
 const ATTEMPT_INTERVAL_SECONDS = 24 * 60 * 60;
 
 /**
@@ -92,6 +88,7 @@ fi
 omp update
 `;
 
+
 function logLine(message: string): void {
 	const logDir = join(homedir(), ".omp", "logs");
 	mkdirSync(logDir, { recursive: true });
@@ -116,41 +113,17 @@ function spawnUpdater(reason: string): void {
 	child.unref();
 }
 
-async function checkAndUpdate(): Promise<void> {
-	if (!cfgStartupCheckUpdate.get(settings)) {
-		logLine("startup.checkUpdate is off; not checking");
-		return;
-	}
-
-	const channel = cfgUpdateChannel.get(settings);
-	try {
-		const release = await getLatestRelease({ timeoutMs: CHECK_TIMEOUT_MS, channel });
-		if (Bun.semver.order(release.version, VERSION) <= 0) {
-			logLine(`up to date (${VERSION}, ${channel})`);
-			return;
-		}
-		spawnUpdater(`new release ${release.version} (running ${VERSION}); running proxyon + omp update`);
-	} catch (error) {
-		// This check shares omp's own in-process network path, so a proxy gap or a
-		// registry hiccup surfaces here rather than as a banner. Hand the decision
-		// to `omp update` inside the proxied shell: it re-checks on its own and
-		// no-ops when nothing is newer.
-		const detail = error instanceof Error ? error.message : String(error);
-		spawnUpdater(`version check failed (${detail}); falling back to proxyon + omp update`);
-	}
-}
-
 export default function autoUpdate(pi: ExtensionAPI): void {
 	let scheduled = false;
 
 	pi.on("session_start", (_event, ctx) => {
-		if (scheduled || ctx.agent.kind !== "main") return;
+		if (scheduled) return;
 		scheduled = true;
 		// Written from the handler, so the log doubles as proof that the extension
 		// was discovered and reached `session_start` in this process.
-		logLine(`session started (omp ${VERSION}, pid ${process.pid}); checking in ${START_DELAY_MS}ms`);
+		logLine(`session started (pid ${process.pid}); handing the version check to omp update in ${START_DELAY_MS}ms`);
 		ctx.setTimeout(() => {
-			void checkAndUpdate();
+			spawnUpdater("spawning detached proxied shell: omp update");
 		}, START_DELAY_MS);
 	});
 }
