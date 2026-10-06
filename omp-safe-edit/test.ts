@@ -124,24 +124,29 @@ const P = (body: string) => ({ input: `*** Begin Patch\n${body}*** End Patch\n` 
 { const f = await seed(TS); await rejects("phantom removed line rejected", () => run("ctx_patch", P(`*** Update File: ${f}\n@@\n function alpha() {\n-  return 999;\n+  x\n }\n`)), "context not found");
   eq("…and file untouched", await read(f), TS); }
 { const f = await seed("a();\nlog();\nb();\nlog();\nc();\n");
-  await rejects("ambiguous hunk rejected with both sites", () => run("ctx_patch", P(`*** Update File: ${f}\n@@\n-log();\n+trace();\n`)), "matches 2 locations", "line 2", "line 4"); }
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-log();\n+trace();\n`));
+  eq("repeated context selects first match", await read(f), "a();\ntrace();\nb();\nlog();\nc();\n"); }
 { const f = await seed("a();\nlog();\nb();\nlog();\nc();\n");
   await run("ctx_patch", P(`*** Update File: ${f}\n@@\n a();\n-log();\n+t1();\n b();\n@@\n-log();\n+t2();\n c();\n`));
   eq("sequential hunks on repeated code", await read(f), "a();\nt1();\nb();\nt2();\nc();\n"); }
-{ const f = await seed(TS); await rejects("anchorless insertion rejected", () => run("ctx_patch", P(`*** Update File: ${f}\n@@\n+// new\n`)), "nothing to anchor"); }
+{ const f = await seed(TS); await run("ctx_patch", P(`*** Update File: ${f}\n@@\n+// new\n`));
+  eq("anchorless insertion appends at EOF", await read(f), `${TS}// new\n`); }
 { const f = await seed(PY); await run("ctx_patch", P(`*** Update File: ${f}\n@@\n   def go(self):\n-    return 1\n+    return 2\n`));
-  eq("2-space patch reindented onto 4-space file", await read(f), "class A:\n    def go(self):\n        return 2\n"); }
+  eq("fuzzy match preserves context but writes additions verbatim", await read(f), "class A:\n    def go(self):\n    return 2\n"); }
 { const f = await seed("def a():\n    if x:\n        y()\n");
   await run("ctx_patch", P(`*** Update File: ${f}\n@@\n def a():\n   if x:\n-    y()\n+    z()\n`));
-  eq("nested multi-level reindent", await read(f), "def a():\n    if x:\n        z()\n"); }
-{ const f = await seed(PY); await rejects("unmappable added indentation rejected", () => run("ctx_patch", P(`*** Update File: ${f}\n@@\n   def go(self):\n-    return 1\n+      deeper()\n`)), "cannot place the added line", "indentations in the hunk"); }
+  eq("nested additions are not reindented", await read(f), "def a():\n    if x:\n    z()\n"); }
+{ const f = await seed(PY); await run("ctx_patch", P(`*** Update File: ${f}\n@@\n   def go(self):\n-    return 1\n+      deeper()\n`));
+  eq("new indentation level is accepted", await read(f), "class A:\n    def go(self):\n      deeper()\n"); }
 { await run("ctx_patch", P(`*** Add File: sub/deep/new.ts\n+export const x = 1;\n`));
   eq("Add File creates nested path", await read("sub/deep/new.ts"), "export const x = 1;\n");
-  await rejects("Add File onto existing rejected", () => run("ctx_patch", P(`*** Add File: sub/deep/new.ts\n+dup\n`)), "already exists"); }
+  await run("ctx_patch", P(`*** Add File: sub/deep/new.ts\n+dup\n`));
+  eq("Add File can replace an existing file", await read("sub/deep/new.ts"), "dup\n"); }
 { const f = await seed("bye\n"); await run("ctx_patch", P(`*** Delete File: ${f}\n`));
   ok("Delete File removes it", !(await Bun.file(join(root, f)).exists()));
   await rejects("Delete of missing rejected", () => run("ctx_patch", P(`*** Delete File: ghost.ts\n`)), "does not exist"); }
-{ const f = await seed("a = 1;\n"); await rejects("no-op patch rejected", () => run("ctx_patch", P(`*** Update File: ${f}\n@@\n a = 1;\n`)), "changed nothing"); }
+{ const f = await seed("a = 1;\n"); await run("ctx_patch", P(`*** Update File: ${f}\n@@\n a = 1;\n`));
+  eq("no-op patch succeeds", await read(f), "a = 1;\n"); }
 await rejects("missing envelope rejected", () => run("ctx_patch", { input: "just text\n" }), "must start with");
 await rejects("missing End Patch rejected", () => run("ctx_patch", { input: `*** Begin Patch\n*** Update File: x.ts\n@@\n a\n` }), "missing the closing");
 { const f = await seed("v = 1;\n"); await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-v = 1;\n+v = 2;\n*** Move to: moved/out.ts\n`));
@@ -175,7 +180,12 @@ await rejects("content before any directive rejected", () => run("ctx_patch", { 
 { const f = await seed(TS); await rejects("Update File with no hunks rejected", () => run("ctx_patch", P(`*** Update File: ${f}\n`)), "has no hunks"); }
 await rejects("Add File body must use +", () => run("ctx_patch", P(`*** Add File: bad.ts\nplain line\n`)), 'must start with "+"');
 { const f = await seed(TS); await rejects("bad row prefix rejected", () => run("ctx_patch", P(`*** Update File: ${f}\n@@\n?huh\n`)), 'must start with'); }
-await rejects("cwd escape refused", () => run("ctx_patch", P(`*** Update File: /etc/hosts\n@@\n-a\n+b\n`)), "outside the session workspace");
+{ const f = await seed("outside\n");
+  const nestedCtx = { ...ctx, cwd: join(root, "nested") };
+  await tools.ctx_patch.execute("t", P(`*** Update File: ../${f}\n@@\n-outside\n+updated\n`), undefined, undefined, nestedCtx);
+  eq("relative paths outside cwd are permitted", await read(f), "updated\n");
+  await run("ctx_patch", P(`*** Update File: ${join(root, f)}\n@@\n-updated\n+absolute\n`));
+  eq("absolute paths are supported", await read(f), "absolute\n"); }
 
 console.log("\n=== ctx_patch: @@ locator + End of File (ported from file_update.rs) ===");
 // A file where the same three-line shape occurs inside two different classes.
@@ -184,8 +194,8 @@ const DUP = [
 	"class Beta:", "    def run(self):", "        prepare()", "        return 1", "",
 ].join("\n");
 { const f = await seed(DUP);
-  await rejects("without a locator the repeated hunk is ambiguous", () => run("ctx_patch", P(`*** Update File: ${f}\n@@\n         prepare()\n-        return 1\n+        return 2\n`)),
-    "matches 2 locations", "line 3", "line 8", 'name the enclosing declaration after "@@"'); }
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n         prepare()\n-        return 1\n+        return 2\n`));
+  eq("without a locator the first class is selected", await read(f), DUP.replace("return 1", "return 2")); }
 { const f = await seed(DUP);
   await run("ctx_patch", P(`*** Update File: ${f}\n@@ class Beta:\n         prepare()\n-        return 1\n+        return 2\n`));
   const out = await read(f);
@@ -202,9 +212,9 @@ const DUP = [
 { const f = await seed(DUP);
   const r: any = await run("ctx_patch", P(`*** Update File: ${f}\n@@ class Alpha:\n-        prepare()\n+        setup()\n`));
   const out = await read(f);
-  ok("locator breaks a tie and warns about it",
+  ok("locator selects first match without ambiguity warnings",
     out.split("\n")[2] === "        setup()" && out.split("\n")[7] === "        prepare()"
-      && r.details.warnings.some((w: string) => w.includes("took the first, at line 3")),
+      && r.details.warnings.length === 0,
     JSON.stringify({ out, w: r.details.warnings })); }
 { const f = await seed("a\nb\nc\n"); await run("ctx_patch", P(`*** Update File: ${f}\n@@\n a\n-b\n+B\n`));
   eq("bare @@ applies no narrowing", await read(f), "a\nB\nc\n"); }
@@ -212,8 +222,8 @@ const DUP = [
   await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-end\n+END\n*** End of File\n`));
   eq("End of File selects the tail occurrence", await read(f), "x\nend\ny\nEND\n"); }
 { const f = await seed("x\nend\ny\nend\n");
-  await rejects("same hunk without End of File is ambiguous", () => run("ctx_patch", P(`*** Update File: ${f}\n@@\n-end\n+END\n`)),
-    "matches 2 locations"); }
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-end\n+END\n`));
+  eq("without End of File the first occurrence wins", await read(f), "x\nEND\ny\nend\n"); }
 await rejects("End of File before any hunk body rejected", () => run("ctx_patch", P(`*** Update File: x.ts\n*** End of File\n`)), "must follow a hunk body");
 { const f = await seed("keep\nlast\n");
   await run("ctx_patch", P(`*** Update File: ${f}\n@@\n keep\n-last\n+final\n*** End of File\n`));
@@ -221,19 +231,84 @@ await rejects("End of File before any hunk body rejected", () => run("ctx_patch"
 { const f = await seed(DUP);
   // Self-contradictory: the marker asserts end-of-file, but `prepare()` is not the tail.
   await rejects("false End of File assertion is rejected, not relocated", () => run("ctx_patch", P(`*** Update File: ${f}\n@@     def run(self):\n-        prepare()\n+        setup()\n*** End of File\n`)),
-    "does not match the tail", "The file actually ends with");
+    "does not match the tail");
   eq("…and the file is untouched", await read(f), DUP); }
 { const f = await seed(DUP);
   // Same hunk without the false marker: the locator declares intent, first match wins.
   await run("ctx_patch", P(`*** Update File: ${f}\n@@ class Beta:\n-        prepare()\n+        setup()\n`));
   eq("locator alone reaches the second class", (await read(f)).split("\n")[7], "        setup()"); }
 
-console.log("\n=== write guard (both extensions) ===");
+console.log("\n=== ctx_patch: compatibility edge cases ===");
+{ const r = await run("ctx_patch", P(""));
+  ok("empty patch succeeds", r.details.files.length === 0); }
+{ await run("ctx_patch", P("*** Add File: empty.txt\n"));
+  eq("Add File with no rows creates an empty file", await read("empty.txt"), ""); }
+{ const f = await seed(""); await run("ctx_patch", P(`*** Update File: ${f}\n@@\n+first\n`));
+  eq("insertion into empty file has no phantom blank line", await read(f), "first\n"); }
+{ const f = await seed("only\n"); await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-only\n`));
+  eq("deleting all lines leaves an empty file", await read(f), ""); }
+{ const f = await seed("head\ntail\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@ head\n+appended\n@@\n-tail\n+TAIL\n`));
+  eq("append validates locator without consuming later search cursor", await read(f), "head\nTAIL\nappended\n"); }
+{ const f = await seed("head\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n+one\n@@\n+two\n`));
+  eq("multiple EOF insertions retain patch order", await read(f), "head\none\ntwo\n"); }
+{ const f = await seed("head\n");
+  await rejects("pure insertion still validates locator", () => run("ctx_patch", P(`*** Update File: ${f}\n@@ missing\n+tail\n`)), '"@@" locator');
+  eq("invalid insertion locator leaves file untouched", await read(f), "head\n"); }
+{ const f = await seed("a\nb\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-b\n+B\n \n*** End of File\n`));
+  eq("EOF trailing empty context retries without sentinel", await read(f), "a\nB\n"); }
+{ const f = await seed("a\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-a\n-\n+A\n+\n`));
+  eq("trailing empty old and new rows retry independently", await read(f), "A\n"); }
+{ const f = await seed("a\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n a\n \n+tail\n`));
+  eq("old sentinel remains a new blank when followed by additions", await read(f), "a\n\ntail\n"); }
+{ const f = await seed("a\n\nb\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n a\n \n-b\n-\n`));
+  eq("new sentinel removal retains old context consumption", await read(f), "a\n"); }
+{ const f = await seed("before\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n*** Move to: canonical/moved.ts\n@@\n-before\n+after\n`));
+  eq("canonical Move to before hunks works", await read("canonical/moved.ts"), "after\n"); }
+{ const f = await seed("before\n");
+  const blocker = await seed("not a directory\n");
+  await rejects("move rejects an unusable destination parent", () => run("ctx_patch",
+    P(`*** Update File: ${f}\n*** Move to: ${blocker}/dest.ts\n@@\n-before\n+after\n`)));
+  eq("failed destination creation leaves source unchanged", await read(f), "before\n");
+  eq("failed destination creation leaves blocking file unchanged", await read(blocker), "not a directory\n"); }
+{ const f = await seed("before\n");
+  await mkdir(join(root, "move-directory"), { recursive: true });
+  await rejects("move rejects writing over a directory", () => run("ctx_patch",
+    P(`*** Update File: ${f}\n*** Move to: move-directory\n@@\n-before\n+after\n`)));
+  eq("failed destination write leaves source unchanged", await read(f), "before\n"); }
+{ const f = await seed("before\n"); const dest = await seed("existing destination\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n*** Move to: ${dest}\n@@\n-before\n+after\n`));
+  eq("move overwrites destination with updated source", await read(dest), "after\n");
+  ok("successful destination write is followed by source removal", !(await Bun.file(join(root, f)).exists())); }
+{ const f = await seed("before\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n*** Move to: ./${f}\n@@\n-before\n+after\n`));
+  eq("move to the same resolved path updates without deleting it", await read(f), "after\n"); }
+{ const f = await seed("a\n\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-a\n+A\n \n`));
+  eq("real trailing blank context is retained", await read(f), "A\n\n"); }
+{ const f = await seed("  x\nx\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-x\n+y\n`));
+  eq("exact later match beats earlier fuzzy match", await read(f), "  x\ny\n"); }
+{ const f = await seed("one\u00a0two\u2009three\n");
+  await run("ctx_patch", P(`*** Update File: ${f}\n@@\n-one two three\n+done\n`));
+  eq("Unicode spaces fold to ASCII spaces", await read(f), "done\n"); }
+{ const f = await seed("a\nb\n");
+  await rejects("EOF matching cannot move behind prior hunk", () => run("ctx_patch", P(`*** Update File: ${f}\n@@\n-b\n+B\n@@\n-b\n+C\n*** End of File\n`)), "context not found");
+  eq("failed later hunk leaves same file untouched", await read(f), "a\nb\n"); }
+
+console.log("\n=== write guard (str_replace only) ===");
 async function callGuard(hs: Function[], input: any) {
 	for (const h of hs) { const r = await h({ type: "tool_call", toolCallId: "w", toolName: "write", input }, ctx); if (r) return r; }
 	return undefined;
 }
-for (const [name, hs] of [["str-replace", srHandlers], ["ctx-patch", cpHandlers]] as const) {
+ok("ctx_patch does not intercept other tool calls", cpHandlers.length === 0);
+for (const [name, hs] of [["str-replace", srHandlers]] as const) {
 	const f = await seed("real code\n");
 	const blocked = await callGuard(hs, { path: f, content: "oops" });
 	ok(`${name}: overwrite of existing file blocked`, blocked?.block === true && String(blocked.reason).includes("Refusing to overwrite"));

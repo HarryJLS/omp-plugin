@@ -2,6 +2,20 @@
 
 Semantic versioning. Dates are `YYYY-MM-DD`.
 
+## Unreleased
+
+- Write Move destinations before removing sources, preserving source contents when
+  destination creation or writing fails; report a written destination if source removal fails.
+- Align `ctx_patch` matching with Codex: first matching region wins, additions stay
+  verbatim, insertion-only hunks append at EOF, and trailing empty patterns can retry
+  without their sentinel. Remove ambiguity warnings and indentation remapping.
+- Accept no-op updates, empty patches, Add over existing files, and paths outside cwd.
+  Stop intercepting the host's `write` tool. `str_replace` is unchanged.
+- Fix Unicode space folding, empty-file insertion, and full-content deletion.
+- Preserve `ctx_patch({ input })`, the existing install path and stats command.
+  Correct the tool description to report possible partial multi-file application.
+- Add compatibility regression tests and document remaining host/transport differences.
+
 ## [0.1.0] - 2026-09-26
 
 Initial version:
