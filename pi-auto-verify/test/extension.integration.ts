@@ -5,15 +5,43 @@ import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import { afterEach, expect, test } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, Type, type JsonObject } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHarness, type Harness } from "@pi-test/harness";
-import { createTestResourceLoader } from "@pi-test/utilities";
+import { createTestExtensionsResult, createTestResourceLoader } from "@pi-test/utilities";
 import { loadExtensions } from "@pi-test/loader";
 import autoVerify from "../src/index.ts";
 
+type TodoTask = { id: number; subject: string; status: "pending" | "in_progress" | "completed" | "deleted" };
+
 const harnesses: Harness[] = [];
 
-async function setup() {
-  const harness = await createHarness({ extensionFactories: [autoVerify] });
+/** 可见的 todo 列表状态；stub 每次返回与 rpiv-todo 相同的 details 形状。 */
+const todoState: { tasks: TodoTask[] } = { tasks: [] };
+
+function openTodo(subject = "完成改动并实际验证", id = 1): TodoTask {
+  return { id, subject, status: "in_progress" };
+}
+
+function todoStub(pi: ExtensionAPI) {
+  pi.registerTool({
+    name: "todo", label: "Todo", description: "集成测试用的 todo 工具，details 形状与 rpiv-todo 一致",
+    parameters: Type.Object({ action: Type.Optional(Type.String({ description: "测试用参数" })) }),
+    async execute() {
+      const tasks = todoState.tasks.map((task) => ({ ...task }));
+      return {
+        content: [{
+          type: "text" as const,
+          text: tasks.length ? tasks.map((task) => `[${task.status}] #${task.id} ${task.subject}`).join("\n") : "No todos",
+        }],
+        details: { action: "list", params: {}, tasks, nextId: tasks.length + 1 },
+      };
+    },
+  });
+}
+
+async function setup(tasks: TodoTask[] = [openTodo()]) {
+  todoState.tasks = tasks;
+  const harness = await createHarness({ extensionFactories: [autoVerify, todoStub] });
   harnesses.push(harness);
   await harness.session.bindExtensions({ shutdownHandler: () => {} });
   return harness;
@@ -27,8 +55,16 @@ function call(name: string, args: JsonObject) {
 
 const mainCriterion = { id: "main", description: "实际答案符合要求", kind: "smoke", mode: "runtime" };
 
+/**
+ * 与 verify_plan 同一轮发出 `todo` 调用：本扩展只在任务使用 todo 列表跟踪时才在结束前
+ * 检查验收（与 OMP 的 todo 收尾检查一致），所以启用触发的用例必须先产生一次成功快照。
+ * 需要"没有 todo 列表"的用例用 `setup([])` 并省略这一步。
+ */
 function plan(overrides: JsonObject = {}) {
-  return call("verify_plan", { task: "change", surface: "cli", criteria: [mainCriterion], ...overrides });
+  return fauxAssistantMessage([
+    fauxToolCall("todo", { action: "list" }),
+    fauxToolCall("verify_plan", { task: "change", surface: "cli", criteria: [mainCriterion], ...overrides }),
+  ], { stopReason: "toolUse" });
 }
 
 function reports(h: Harness) {
@@ -39,6 +75,12 @@ function reports(h: Harness) {
 function reportData(h: Harness) {
   return h.sessionManager.getEntries().flatMap((e) =>
     e.type === "custom" && e.customType === "auto-verify/report" ? [e.data] : []);
+}
+
+/** 扩展注入的可见提示（续跑说明与最终结论）。 */
+function notes(h: Harness) {
+  return h.sessionManager.getEntries().flatMap((e) =>
+    e.type === "custom_message" && e.customType === "auto-verify" && typeof e.content === "string" ? [e.content] : []);
 }
 
 afterEach(() => {
@@ -111,8 +153,10 @@ test("伪造证据被拒绝；环境受阻明确结束但不算通过", async ()
 });
 
 test("权限扩展可以阻止验证命令，verify_run 不绕过它", async () => {
+  // 该用例直接构造 harness，必须显式让触发条件（todo 列表有未完成项）成立。
+  todoState.tasks = [openTodo()];
   const h = await createHarness({
-    extensionFactories: [autoVerify, (pi) => {
+    extensionFactories: [autoVerify, todoStub, (pi) => {
       pi.on("tool_call", (event) => {
         if (event.toolName === "bash") return { block: true, reason: "测试权限禁止执行" };
       });
@@ -156,11 +200,137 @@ test("简单问答不会进入验证循环", async () => {
   expect(h.eventsOfType("agent_settled")).toHaveLength(1);
 });
 
+test("没有 todo 列表时，改了文件也不进入验证循环", async () => {
+  const h = await setup([]);
+  h.setResponses([
+    plan(),
+    call("write", { path: "answer.txt", content: "42" }),
+    fauxAssistantMessage("修改完成"),
+  ]);
+  await h.session.prompt("写入答案");
+  expect(await readFile(join(h.tempDir, "answer.txt"), "utf8")).toBe("42");
+  expect(h.getPendingResponseCount()).toBe(0);
+  expect(reports(h)).toEqual([]);
+  expect(notes(h)).toEqual([]);
+  expect(h.eventsOfType("agent_settled")).toHaveLength(1);
+});
+
+test("todo 全部完成或已被清空时不再强制续跑，但仍登记未通过结论", async () => {
+  const h = await setup([{ id: 1, subject: "完成改动", status: "completed" }]);
+  h.setResponses([
+    plan(),
+    call("write", { path: "answer.txt", content: "42" }),
+    fauxAssistantMessage("全部完成"),
+  ]);
+  await h.session.prompt("写入答案并收尾");
+  expect(await readFile(join(h.tempDir, "answer.txt"), "utf8")).toBe("42");
+  expect(h.getPendingResponseCount()).toBe(0);
+  expect(h.eventsOfType("agent_settled")).toHaveLength(1);
+  expect(reports(h).map((r) => r?.status)).toEqual(["unverified"]);
+  expect(reportData(h).at(-1)).toMatchObject({ rounds: 0, reason: "todo 列表已无未完成项，不再自动续跑。" });
+  expect(notes(h)).toEqual(["自动验证结束，但未通过验收：unverified。todo 列表已无未完成项，不再自动续跑。"]);
+});
+
+test("todo 关闭后仍登记最终结论：证据齐备也算通过", async () => {
+  const h = await setup([openTodo("完成改动并实际验证", 2)]);
+  h.setResponses([
+    plan(),
+    call("write", { path: "answer.txt", content: "42" }),
+    call("verify_run", { kind: "smoke", command: "test \"$(cat answer.txt)\" = 42", purpose: "确认文件值为 42" }),
+    // 验证通过后把 todo 收尾，再结束：此时不应再被要求继续，但结论必须留下。
+    () => {
+      todoState.tasks = [{ id: 2, subject: "完成改动并实际验证", status: "completed" }];
+      return call("todo", { action: "list" });
+    },
+    fauxAssistantMessage("验证通过并已收尾"),
+  ]);
+  await h.session.prompt("写入答案并验证");
+  expect(h.getPendingResponseCount()).toBe(0);
+  expect(h.eventsOfType("agent_settled")).toHaveLength(1);
+  expect(reports(h).map((r) => r?.status)).toEqual(["evidence_complete"]);
+  expect(notes(h).at(-1)).toContain("执行证据齐备（未独立审查）：main: 实际答案符合要求");
+});
+
+test("同一会话的下一个任务不会继承上一个任务的 todo 状态", async () => {
+  const h = await setup();
+  h.setResponses([
+    plan(),
+    call("write", { path: "answer.txt", content: "42" }),
+    call("verify_run", { kind: "smoke", command: "test \"$(cat answer.txt)\" = 42", purpose: "确认文件值为 42" }),
+    fauxAssistantMessage("第一个任务完成"),
+  ]);
+  await h.session.prompt("第一个任务");
+  expect(reports(h).map((r) => r?.status)).toEqual(["evidence_complete"]);
+
+  // 第二个任务不碰 todo：分支里还留着上个任务的 todo 快照，但不能再触发检查。
+  h.setResponses([
+    call("write", { path: "second.txt", content: "43" }),
+    fauxAssistantMessage("第二个任务完成"),
+  ]);
+  await h.session.prompt("第二个任务");
+  expect(await readFile(join(h.tempDir, "second.txt"), "utf8")).toBe("43");
+  expect(h.getPendingResponseCount()).toBe(0);
+  expect(reports(h).map((r) => r?.status)).toEqual(["evidence_complete"]);
+  expect(notes(h)).toHaveLength(1);
+});
+
+test("存在未完成 todo 时续跑，并在提示中列出未完成项", async () => {
+  const h = await setup([{ id: 1, subject: "实现触发器", status: "completed" }, openTodo("验证并记录证据", 2)]);
+  h.setResponses([
+    plan(),
+    call("write", { path: "answer.txt", content: "42" }),
+    fauxAssistantMessage("先结束看看"),
+    call("verify_run", { kind: "smoke", command: "test \"$(cat answer.txt)\" = 42", purpose: "确认文件值为 42" }),
+    fauxAssistantMessage("验证完成"),
+  ]);
+  await h.session.prompt("写入答案并验证");
+  expect(reports(h).map((r) => r?.status)).toEqual(["pending", "evidence_complete"]);
+  const injected = notes(h);
+  expect(injected).toHaveLength(2);
+  expect(injected[0]).toContain("todo 列表中仍有 1 项未完成");
+  expect(injected[0]).toContain("#2 验证并记录证据");
+  expect(injected[0]).toContain("自动验证 1/3");
+});
+
+test("/auto-verify status 会说明当前触发条件", async () => {
+  const h = await setup([openTodo("验证并记录证据", 2)]);
+  h.setResponses([
+    call("todo", { action: "list" }),
+    fauxAssistantMessage("已登记待办"),
+  ]);
+  await h.session.prompt("登记待办");
+  // 有未完成 todo 但没有改动、也没有验收计划：条件成立但无事可查，不应产生报告或续跑。
+  expect(reports(h)).toEqual([]);
+  await h.session.prompt("/auto-verify status");
+  expect(notes(h).at(-1)).toContain("触发条件：todo 仍有 1 项未完成：#2 验证并记录证据");
+});
+
+test("注入的验证提示词说明触发条件依赖 todo 列表", async () => {
+  const h = await setup();
+  h.setResponses([
+    (context) => {
+      const system = JSON.stringify(context.messages);
+      expect(system).toContain("只对**用 todo 列表跟踪过的任务**启动");
+      expect(system).toContain("把验证本身作为 todo 列表中的一项");
+      return call("todo", { action: "list" });
+    },
+    fauxAssistantMessage("收到"),
+  ]);
+  await h.session.prompt("随便问一句");
+  expect(h.getPendingResponseCount()).toBe(0);
+  // 只有 todo 快照而没有改动：条件成立但无事可查，不产生报告也不续跑。
+  expect(reports(h)).toEqual([]);
+});
+
 test("真实文件加载：Pi 加载器可以加载本地包，执行验证并读取随包提示词", async () => {
   const entry = fileURLToPath(new URL("../src/index.ts", import.meta.url));
   const loaded = await loadExtensions([entry], process.cwd());
   expect(loaded.errors).toEqual([]);
-  const h = await createHarness({ resourceLoader: createTestResourceLoader({ extensionsResult: loaded }) });
+  // harness 优先使用 resourceLoader，所以 todo 快照工具也必须并进真实加载器这一侧的结果。
+  todoState.tasks = [openTodo()];
+  const stub = await createTestExtensionsResult([todoStub]);
+  const extensionsResult = { ...loaded, extensions: [...loaded.extensions, ...stub.extensions] };
+  const h = await createHarness({ resourceLoader: createTestResourceLoader({ extensionsResult }) });
   harnesses.push(h);
   await h.session.bindExtensions({ shutdownHandler: () => {} });
   h.setResponses([
@@ -261,6 +431,8 @@ test("用户取消时不重新启动验证循环", async () => {
 test("缺少计划时不会执行任意验证命令，续跑后先对齐验收", async () => {
   const h = await setup();
   h.setResponses([
+    // 先产生一次 todo 快照，使结束前的检查条件成立；此时刻意还没有 verify_plan。
+    call("todo", { action: "list" }),
     call("write", { path: "answer.txt", content: "42" }),
     call("verify_run", { kind: "smoke", command: "touch bypass.txt", purpose: "未声明计划" }),
     fauxAssistantMessage("完成"),
@@ -380,8 +552,10 @@ test("代码变更不能以文档不适用跳过验收", async () => {
 });
 
 test("视觉证据协议：纯文字不得放行，真实 image 内容与运行记录可绑定", async () => {
+  // 该用例直接构造 harness，必须显式让触发条件（todo 列表有未完成项）成立。
+  todoState.tasks = [openTodo()];
   // 此处只测试工具协议，不把脚本化截图工具声称为真实浏览器 E2E。
-  const h = await createHarness({ extensionFactories: [autoVerify, (pi) => {
+  const h = await createHarness({ extensionFactories: [autoVerify, todoStub, (pi) => {
     pi.registerTool({
       name: "browser_capture", label: "Capture", description: "测试视觉结果协议",
       parameters: Type.Object({}),

@@ -11,7 +11,7 @@
 | [`omp-option-chords/`](./omp-option-chords/README.md) | omp 插件 | 0.1.0 | 在把 Option+键组合成字符的终端（Warp、Terminal.app 等）里恢复 omp 的 Alt 组合键 |
 | [`omp-auto-update/`](./omp-auto-update/README.md) | omp 插件 | 0.1.0 | 启动后在后台通过 `proxyon` 静默执行 `omp update`，最多每 24 小时检查一次 |
 | [`omp-safe-edit/`](./omp-safe-edit/README.md) | omp 扩展 | 0.1.0 | 用内容锚定工具替换内置 `edit`：`ctx_patch` 对齐 Codex 补丁行为；`str_replace` 保留唯一匹配与 `write` 覆盖保护 |
-| [`pi-auto-verify/`](./pi-auto-verify/README.md) | Pi 扩展 | 0.2.0 | OMP 风格的逐项验收、修复前后对照、实际冒烟/E2E 与可选独立审查 |
+| [`pi-auto-verify/`](./pi-auto-verify/README.md) | Pi 扩展 | 0.3.0 | OMP 风格的逐项验收、修复前后对照、实际冒烟/E2E 与可选独立审查；结束前的检查由 todo 列表触发 |
 | [`oh-my-pi-vscode/`](./oh-my-pi-vscode/README.md) | VS Code 扩展 | 1.3.0 | 在 VS Code 侧边栏里嵌入运行 `omp` 的终端面板（预打包 `.vsix`） |
 
 ## 通用约定

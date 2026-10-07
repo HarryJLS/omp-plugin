@@ -6,6 +6,7 @@ import { defaults, loadConfig } from "./config.ts";
 import { VerificationState, type Evidence } from "./state.ts";
 import { excerpt, parseReview } from "./review.ts";
 import { snapshot, type Snapshot } from "./workspace.ts";
+import { EMPTY_TODO_SNAPSHOT, isTaskDetails, mergeTodoSnapshot, type TodoSnapshot } from "./todo.ts";
 
 const instructions = readFileSync(new URL("./verify.md", import.meta.url), "utf8");
 const reviewerInstructions = readFileSync(new URL("./reviewer.md", import.meta.url), "utf8");
@@ -36,6 +37,7 @@ export default function autoVerify(pi: ExtensionAPI): void {
   let knownWrites = false;
   let unknownChanges = false;
   let lastFailure = "";
+  let todos: TodoSnapshot = EMPTY_TODO_SNAPSHOT;
 
   function display(ctx: ExtensionContext): void {
     ctx.ui.setStatus("auto-verify", active ? `验证: ${state.status}` : undefined);
@@ -78,6 +80,7 @@ export default function autoVerify(pi: ExtensionAPI): void {
     knownWrites = false;
     unknownChanges = false;
     lastFailure = "";
+    todos = EMPTY_TODO_SNAPSHOT;
     userRequest = event.prompt;
     try {
       config = await loadConfig(ctx.cwd);
@@ -105,6 +108,7 @@ export default function autoVerify(pi: ExtensionAPI): void {
     state = new VerificationState(config.maxRounds, config.requireE2E, config.reviewer === "current");
     starts.clear();
     running.clear();
+    todos = EMPTY_TODO_SNAPSHOT;
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -131,6 +135,11 @@ export default function autoVerify(pi: ExtensionAPI): void {
   pi.on("tool_result", async (event, ctx) => {
     const start = starts.get(event.toolCallId);
     starts.delete(event.toolCallId);
+    // todo 结果不进 `starts`（不是 shell/观测工具），必须在下面的早退之前累积，
+    // 否则本任务的 todo 状态永远为空、扩展再也不会介入。按任务累积，避免跨任务误触发。
+    if (event.toolName === "todo" && isTaskDetails(event.details)) {
+      todos = mergeTodoSnapshot(todos, event.details);
+    }
     if (!active || start === undefined) return;
     await refresh(ctx);
     if (snapshotError || start !== state.revision ||
@@ -359,9 +368,12 @@ export default function autoVerify(pi: ExtensionAPI): void {
   pi.on("agent_before_settle", async (event, ctx) => {
     if (!active || event.outcome !== "completed" || event.continue || ctx.signal?.aborted) return;
     await refresh(ctx);
+    // 介入范围由 todo 列表决定：本任务用 todo 跟踪过才在结束前检查验收（而不是按文件修改）。
+    // 是否强制续跑则与 OMP 的 `todo.checkCompletion` 一致——只有仍有未完成项时才继续。
+    if (!todos.used) return;
     if (snapshotError && state.dirty) state.finish("blocked", snapshotError);
     // 即将追加的验证消息会提供可续跑上下文；事件预览尚未包含它。
-    const continueRun = state.settle(true);
+    const continueRun = state.settle(todos.open > 0, "todo 列表已无未完成项，不再自动续跑。");
     display(ctx);
     if (!state.dirty && state.status === "idle") return;
     const report = state.report();
@@ -374,6 +386,7 @@ export default function autoVerify(pi: ExtensionAPI): void {
         customType: "auto-verify",
         display: true,
         content: `自动验证 ${state.rounds}/${config.maxRounds}：尚缺 ${state.missing().join("、")}。` +
+          `todo 列表中仍有 ${todos.open} 项未完成：${todos.openSummaries.join("；")}。完成实际验证并记录证据后再标记完成。` +
           "先通过 verify_plan 对齐用户全部验收要求，再实际运行并逐项记录结果；开启审查时最后调用 verify_review。" +
           "失败则修复并重测；不可运行时用 verify_finish 说明。不要擅自安装、部署或调用付费接口。" +
           `\n当前验收清单：${JSON.stringify(state.plan ?? null)}` +
@@ -409,10 +422,16 @@ export default function autoVerify(pi: ExtensionAPI): void {
         return;
       }
       if (command !== "status") return ctx.ui.notify("用法：/auto-verify status|on|off", "warning");
+      const trigger = !todos.used
+        ? "本任务没有用 todo 列表跟踪，结束时不介入"
+        : todos.open === 0
+          ? "todo 已无未完成项，结束时不自动续跑"
+          : `todo 仍有 ${todos.open} 项未完成：${todos.openSummaries.join("；")}`;
       pi.sendMessage({
         customType: "auto-verify", display: true,
         content: `自动验证：${active ? state.status : "未启用或等待下一个任务"}；续跑 ${state.rounds}/${config.maxRounds}；` +
           `缺少：${state.missing().join("、") || "无"}。${state.reason}\n` +
+          `触发条件：${trigger}\n` +
           state.report().criteria.map((c) => `${c.id} [${c.status}] ${c.description}`).join("\n") +
           (state.review ? `\n独立审查${state.review.generation === state.generation ? "" : "（已过期）"}：${state.review.verdict}，${state.review.reason}` : "\n未独立审查"),
       }, { triggerTurn: false });

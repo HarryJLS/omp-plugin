@@ -159,7 +159,8 @@ export class VerificationState {
     return !!this.plan && this.missing().every((item) => item === "独立审查");
   }
 
-  settle(canContinue: boolean): boolean {
+  /** `canContinue` 为 false 时不能继续本轮任务，`unavailableReason` 说明具体原因。 */
+  settle(canContinue: boolean, unavailableReason = "当前会话不能继续运行。"): boolean {
     if (!this.dirty || this.status === "blocked" || this.status === "not_applicable") return false;
     if (this.missing().length === 0) {
       this.status = this.reviewer ? "verified" : "evidence_complete";
@@ -167,7 +168,7 @@ export class VerificationState {
     }
     if (!canContinue || this.rounds >= this.maxRounds) {
       this.status = "unverified";
-      this.reason = canContinue ? "自动验证续跑次数已用尽。" : "当前会话不能继续运行。";
+      this.reason = canContinue ? "自动验证续跑次数已用尽。" : unavailableReason;
       return false;
     }
     this.status = "pending";

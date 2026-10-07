@@ -1,6 +1,6 @@
 {
   "name": "pi-auto-verify",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "面向 Pi 的逐项验收、缺陷复现、实际冒烟/E2E 与可选独立审查扩展",
