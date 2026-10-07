@@ -2,7 +2,7 @@
 
 本仓库存放与 [oh-my-pi](https://github.com/can1357/oh-my-pi)（`omp`）及 [Pi](https://github.com/earendil-works/pi) 配套的扩展（extension）、插件（plugin）和工具。两者的扩展接口不同，安装前请确认组件的适用范围。
 
-每个子目录是一个独立组件，各自维护自己的 `README.md`、版本号和变更记录。新增、修改、提交时必须遵守 [`AGENT.md`](./AGENT.md)。
+每个子目录是一个独立组件，各自维护自己的 `README.md`、版本号和变更记录。新增、修改、提交时必须遵守 [`AGENTS.md`](./AGENTS.md)。
 
 ## 组件索引
 
